@@ -1,0 +1,354 @@
+
+FORTIOS 7.6 EVE-NG LAB - FULL DEVICE CONFIGS
+Topology: BGP service failover + MP-BGP EVPN/VXLAN over MPLS L3VPN and Internet/IPsec
+
+Important:
+- Use this as a lab starter config. Interface names may need adjustment based on your EVE-NG node image.
+- FortiGate interface mapping:
+  port1 = CORE
+  port2 = MPLS PE
+  port3 = INET/IPsec
+  port4 = App LAN
+  lo_vtep = VXLAN VTEP loopback
+- Public service VIP: 198.51.100.50/32
+- Internal floating app VIP: 10.10.10.50
+- App subnet/VXLAN segment: 10.10.10.0/24
+- VNI: 10100
+- VLAN/switch interface: sw_vlan100
+- VAN App: 10.10.10.10/24
+- KEL App: 10.10.10.20/24
+
+================================================================================
+1) CORE-R1 - Cisco IOS
+================================================================================
+enable
+configure terminal
+
+hostname CORE-R1
+no ip domain-lookup
+
+!
+! External caller/test user network
+!
+interface Ethernet0/0
+ description External_Caller_PC_LAN
+ ip address 192.0.2.1 255.255.255.0
+ no shutdown
+
+!
+! Link to Vancouver FortiGate
+!
+interface Ethernet0/1
+ description To_FGT-VAN_port1
+ ip address 198.51.100.1 255.255.255.252
+ no shutdown
+
+!
+! Link to Kelowna FortiGate
+!
+interface Ethernet0/2
+ description To_FGT-KEL_port1
+ ip address 203.0.113.5 255.255.255.252
+ no shutdown
+
+!
+! Match only the public service VIP
+!
+ip prefix-list SERVICE-VIP seq 10 permit 198.51.100.50/32
+
+!
+! Prefer Vancouver for the service VIP
+!
+route-map FROM-VAN permit 10
+ match ip address prefix-list SERVICE-VIP
+ set local-preference 200
+
+!
+! Allow any other routes from Vancouver
+!
+route-map FROM-VAN permit 100
+
+!
+! Keep Kelowna as backup for the service VIP
+!
+route-map FROM-KEL permit 10
+ match ip address prefix-list SERVICE-VIP
+ set local-preference 100
+
+!
+! Allow any other routes from Kelowna
+!
+route-map FROM-KEL permit 100
+
+!
+! BGP core/carrier simulation
+!
+router bgp 65000
+ bgp log-neighbor-changes
+
+ !
+ ! Advertise caller network so FortiGates know return path
+ !
+ network 192.0.2.0 mask 255.255.255.0
+
+ !
+ ! Vancouver FortiGate neighbor
+ !
+ neighbor 198.51.100.2 remote-as 65110
+ neighbor 198.51.100.2 description FGT-VAN_port1
+ neighbor 198.51.100.2 route-map FROM-VAN in
+
+ !
+ ! Kelowna FortiGate neighbor
+ !
+ neighbor 203.0.113.6 remote-as 65120
+ neighbor 203.0.113.6 description FGT-KEL_port1
+ neighbor 203.0.113.6 route-map FROM-KEL in
+
+end
+write memory
+============================================================
+CORE-R1 Ethernet0/0 = External Caller LAN 192.0.2.1/24
+CORE-R1 Ethernet0/1 = To FGT-VAN port1 198.51.100.1/30
+CORE-R1 Ethernet0/2 = To FGT-KEL port1 203.0.113.5/30
+
+
+================================================================================
+2) MPLS-PE-VAN - Cisco IOS MPLS L3VPN PE
+================================================================================
+enable
+configure terminal
+
+hostname MPLS-PE-VAN
+no ip domain-lookup
+ip cef
+
+!
+! VRF for the customer/DC transport
+!
+ip vrf VOICE-DR
+ rd 65200:100
+ route-target export 65200:100
+ route-target import 65200:100
+
+!
+! MPLS PE router-id
+!
+interface Loopback0
+ description MPLS_PE_ROUTER_ID
+ ip address 10.255.255.1 255.255.255.255
+
+!
+! PE-CE link to FGT-VAN port2
+!
+interface Ethernet0/0
+ description To_FGT-VAN_port2
+ ip vrf forwarding VOICE-DR
+ ip address 172.16.110.1 255.255.255.252
+ no shutdown
+
+!
+! MPLS core link to MPLS-PE-KEL
+!
+interface Ethernet0/1
+ description To_MPLS-PE-KEL_Ethernet0/0
+ ip address 10.200.0.1 255.255.255.252
+ mpls ip
+ no shutdown
+
+!
+! Enable LDP using Loopback0 as the LDP router-id
+!
+mpls label protocol ldp
+mpls ldp router-id Loopback0 force
+
+!
+! IGP for MPLS core reachability
+! This carries PE loopbacks and MPLS core link only.
+!
+router ospf 100
+ router-id 10.255.255.1
+ network 10.255.255.1 0.0.0.0 area 0
+ network 10.200.0.0 0.0.0.3 area 0
+
+!
+! MP-BGP VPNv4 between provider PE routers
+!
+router bgp 65200
+ bgp log-neighbor-changes
+
+ neighbor 10.255.255.2 remote-as 65200
+ neighbor 10.255.255.2 update-source Loopback0
+
+ address-family vpnv4
+  neighbor 10.255.255.2 activate
+  neighbor 10.255.255.2 send-community both
+ exit-address-family
+
+ !
+ ! Customer VRF BGP toward FGT-VAN
+ !
+ address-family ipv4 vrf VOICE-DR
+  neighbor 172.16.110.2 remote-as 65110
+  neighbor 172.16.110.2 activate
+  neighbor 172.16.110.2 as-override
+ exit-address-family
+
+end
+write memory
+
+================================================================================
+3) MPLS-PE-KEL - Cisco IOS MPLS L3VPN PE
+================================================================================
+enable
+configure terminal
+
+hostname MPLS-PE-KEL
+no ip domain-lookup
+ip cef
+
+!
+! VRF for the customer/DC transport
+!
+ip vrf VOICE-DR
+ rd 65200:100
+ route-target export 65200:100
+ route-target import 65200:100
+
+!
+! MPLS PE router-id
+!
+interface Loopback0
+ description MPLS_PE_ROUTER_ID
+ ip address 10.255.255.2 255.255.255.255
+
+!
+! MPLS core link to MPLS-PE-VAN
+!
+interface Ethernet0/0
+ description To_MPLS-PE-VAN_Ethernet0/1
+ ip address 10.200.0.2 255.255.255.252
+ mpls ip
+ no shutdown
+
+!
+! PE-CE link to FGT-KEL port2
+!
+interface Ethernet0/1
+ description To_FGT-KEL_port2
+ ip vrf forwarding VOICE-DR
+ ip address 172.16.120.1 255.255.255.252
+ no shutdown
+
+!
+! Enable LDP using Loopback0 as the LDP router-id
+!
+mpls label protocol ldp
+mpls ldp router-id Loopback0 force
+
+!
+! IGP for MPLS core reachability
+!
+router ospf 100
+ router-id 10.255.255.2
+ network 10.255.255.2 0.0.0.0 area 0
+ network 10.200.0.0 0.0.0.3 area 0
+
+!
+! MP-BGP VPNv4 between provider PE routers
+!
+router bgp 65200
+ bgp log-neighbor-changes
+
+ neighbor 10.255.255.1 remote-as 65200
+ neighbor 10.255.255.1 update-source Loopback0
+
+ address-family vpnv4
+  neighbor 10.255.255.1 activate
+  neighbor 10.255.255.1 send-community both
+ exit-address-family
+
+ !
+ ! Customer VRF BGP toward FGT-KEL
+ !
+ address-family ipv4 vrf VOICE-DR
+  neighbor 172.16.120.2 remote-as 65120
+  neighbor 172.16.120.2 activate
+  neighbor 172.16.120.2 as-override
+ exit-address-family
+
+end
+write memory
+
+
+================================================================================
+4) INET-R1 - Cisco IOS Internet Edge
+================================================================================
+enable
+configure terminal
+
+hostname INET-R1
+no ip domain-lookup
+
+interface Ethernet0/0
+ description To_FGT-VAN_port3
+ ip address 198.18.10.1 255.255.255.252
+ no shutdown
+
+interface Ethernet0/1
+ description To_INET-R2_Ethernet0/0
+ ip address 198.18.10.5 255.255.255.252
+ no shutdown
+
+router bgp 65310
+ bgp log-neighbor-changes
+
+ neighbor 198.18.10.2 remote-as 65110
+ neighbor 198.18.10.2 description FGT-VAN_port3
+
+ neighbor 198.18.10.6 remote-as 65320
+ neighbor 198.18.10.6 description INET-R2_Ethernet0/0
+
+ network 198.18.10.0 mask 255.255.255.252
+ network 198.18.10.4 mask 255.255.255.252
+
+end
+write memory
+
+
+================================================================================
+5) INET-R2 - Cisco IOS Internet Edge
+================================================================================
+
+enable
+configure terminal
+
+hostname INET-R2
+no ip domain-lookup
+
+interface Ethernet0/0
+ description To_INET-R1_Ethernet0/1
+ ip address 198.18.10.6 255.255.255.252
+ no shutdown
+
+interface Ethernet0/1
+ description To_FGT-KEL_port3
+ ip address 198.18.10.9 255.255.255.252
+ no shutdown
+
+router bgp 65320
+ bgp log-neighbor-changes
+
+ neighbor 198.18.10.5 remote-as 65310
+ neighbor 198.18.10.5 description INET-R1_Ethernet0/1
+
+ neighbor 198.18.10.10 remote-as 65120
+ neighbor 198.18.10.10 description FGT-KEL_port3
+
+ network 198.18.10.4 mask 255.255.255.252
+ network 198.18.10.8 mask 255.255.255.252
+
+end
+write memory
+
+
