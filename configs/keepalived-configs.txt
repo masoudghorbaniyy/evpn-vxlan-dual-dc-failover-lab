@@ -1,0 +1,118 @@
+Keepalived Configuration for EVPN/VXLAN Dual DC Lab
+
+Floating internal VIP:
+
+10.10.10.50
+
+
+DC1 / Vancouver
+Role: MASTER
+Interface: ens4
+Real IP: 10.10.10.10
+Priority: 200
+
+File:
+/etc/keepalived/keepalived.conf
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface ens4
+    virtual_router_id 51
+    priority 200
+    advert_int 1
+
+    unicast_src_ip 10.10.10.10
+    unicast_peer {
+        10.10.10.20
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass lab123
+    }
+
+    virtual_ipaddress {
+        10.10.10.50/24 dev ens4
+    }
+}
+
+
+DC2 / Kelowna
+Role: BACKUP
+Interface: ens4
+Real IP: 10.10.10.20
+Priority: 100
+
+File:
+/etc/keepalived/keepalived.conf
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface ens4
+    virtual_router_id 51
+    priority 100
+    advert_int 1
+
+    unicast_src_ip 10.10.10.20
+    unicast_peer {
+        10.10.10.10
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass lab123
+    }
+
+    virtual_ipaddress {
+        10.10.10.50/24 dev ens4
+    }
+}
+
+
+Commands
+
+Install keepalived:
+
+sudo apt update
+sudo apt install -y keepalived
+
+Restart service:
+
+sudo systemctl restart keepalived
+
+Enable on boot:
+
+sudo systemctl enable keepalived
+
+Check status:
+
+systemctl status keepalived
+
+Check VIP ownership:
+
+ip -br addr show ens4
+ip addr show ens4 | grep 10.10.10.50
+
+View logs:
+
+journalctl -u keepalived -n 50 --no-pager
+
+Follow logs live:
+
+sudo journalctl -u keepalived -f
+
+Trigger failover:
+
+sudo systemctl stop keepalived
+
+Fail back:
+
+sudo systemctl start keepalived
+
+
+Notes
+
+- Only one server should own 10.10.10.50 at a time.
+- If both DC1 and DC2 own the VIP, that is split-brain.
+- In this lab, unicast keepalived is used because the two servers are connected across a VXLAN L2 extension.
+- After failover, keepalived sends gratuitous ARP so the network can update the MAC/FDB entries.

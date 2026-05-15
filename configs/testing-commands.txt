@@ -1,0 +1,294 @@
+EVPN/VXLAN Dual Data Center Lab - Testing and Verification Commands
+
+1. Linux Interface Verification
+
+Run on DC1, DC2, and the test client:
+
+ip -br addr
+ip -br link
+ip route
+ip neigh show
+
+Check only the testing interface:
+
+ip -br addr show ens4
+ip neigh show dev ens4
+
+
+2. Configure Linux Lab IPs
+
+DC1 / Vancouver:
+
+sudo ip addr flush dev ens4
+sudo ip link set ens4 up
+sudo ip addr add 10.10.10.10/24 dev ens4
+
+DC2 / Kelowna:
+
+sudo ip addr flush dev ens4
+sudo ip link set ens4 up
+sudo ip addr add 10.10.10.20/24 dev ens4
+
+External/Test Linux Client:
+
+sudo ip addr flush dev ens4
+sudo ip link set ens4 up
+sudo ip addr add 192.0.2.10/24 dev ens4
+sudo ip route add 198.51.100.50/32 via 192.0.2.1 dev ens4
+
+Optional route for direct internal VIP testing:
+
+sudo ip route add 10.10.10.0/24 via 192.0.2.1 dev ens4
+
+
+3. VXLAN L2 Extension Testing
+
+From DC1 to DC2:
+
+sudo ip neigh flush dev ens4
+ping 10.10.10.20
+traceroute 10.10.10.20
+ip neigh show dev ens4
+
+From DC2 to DC1:
+
+sudo ip neigh flush dev ens4
+ping 10.10.10.10
+traceroute 10.10.10.10
+ip neigh show dev ens4
+
+Expected:
+- Ping should work.
+- Traceroute should show one hop because both hosts are in the same stretched L2 subnet.
+- ARP/neighbor table should show the remote Linux MAC address.
+
+
+4. Web Server Testing
+
+On DC1:
+
+mkdir -p ~/lab-web
+echo "Hello from DC1 / Vancouver" > ~/lab-web/index.html
+cd ~/lab-web
+python3 -m http.server 8080
+
+On DC2:
+
+mkdir -p ~/lab-web
+echo "Hello from DC2 / Kelowna" > ~/lab-web/index.html
+cd ~/lab-web
+python3 -m http.server 8080
+
+Test:
+
+curl http://10.10.10.20:8080
+curl http://10.10.10.10:8080
+
+
+5. Internal Floating VIP Testing
+
+Floating VIP:
+
+10.10.10.50
+
+Manual VIP test on DC1:
+
+sudo ip addr add 10.10.10.50/24 dev ens4
+sudo arping -U -I ens4 10.10.10.50 -c 5
+ip -br addr show ens4
+curl -m 3 http://10.10.10.50:8080
+sudo ip addr del 10.10.10.50/24 dev ens4
+
+Manual VIP test on DC2:
+
+sudo ip addr add 10.10.10.50/24 dev ens4
+sudo arping -U -I ens4 10.10.10.50 -c 5
+ip -br addr show ens4
+curl -m 3 http://10.10.10.50:8080
+sudo ip addr del 10.10.10.50/24 dev ens4
+
+
+6. Keepalived VIP Failover Testing
+
+Check VIP ownership on both DC1 and DC2:
+
+ip -br addr show ens4
+ip addr show ens4 | grep 10.10.10.50
+
+Check keepalived status:
+
+systemctl status keepalived
+systemctl is-active keepalived
+
+Watch VIP movement live:
+
+watch -n 1 "ip -br addr show ens4"
+
+Check keepalived logs:
+
+journalctl -u keepalived -n 50 --no-pager
+
+Follow logs live:
+
+sudo journalctl -u keepalived -f
+
+Trigger failover from DC1 to DC2:
+
+sudo systemctl stop keepalived
+
+Fail back to DC1:
+
+sudo systemctl start keepalived
+
+
+7. Continuous Client Testing
+
+Internal VIP test:
+
+while true; do date; curl -m 2 http://10.10.10.50:8080; sleep 1; done
+
+Public VIP / DNAT test:
+
+while true; do date; curl -m 2 http://198.51.100.50:8080; sleep 1; done
+
+Expected:
+- Before failover, the response should come from DC1.
+- After failover, the response should come from DC2.
+- The URL should not change.
+
+
+8. FortiGate VTEP Reachability Testing
+
+On FGT-VAN:
+
+execute ping-options source 198.51.100.110
+execute ping 203.0.113.120
+execute ping-options reset
+
+On FGT-KEL:
+
+execute ping-options source 203.0.113.120
+execute ping 198.51.100.110
+execute ping-options reset
+
+
+9. FortiGate VXLAN and Bridge Verification
+
+Run on both FortiGates:
+
+show system vxlan
+show system interface vxlan100
+show system switch-interface
+get system interface | grep -f vxlan
+
+Expected:
+- vxlan100 should be up.
+- vxlan100 should be a member of sw_vlan100.
+- sw_vlan100 should include port4 and vxlan100.
+
+
+10. FortiGate ARP and MAC/FDB Verification
+
+Run on both FortiGates:
+
+diagnose ip arp list | grep 10.10.10
+diagnose netlink brctl name host sw_vlan100
+diagnose sys vxlan fdb list vxlan100
+
+Expected:
+- Before failover, DC1 MAC should be active/local from Vancouver side.
+- After failover, DC2 MAC should become active and learned through the correct local/VXLAN path.
+
+
+11. FortiGate Sniffer
+
+ARP and ICMP testing:
+
+diagnose sniffer packet any 'arp or icmp' 4 0 a
+
+Public VIP / DNAT testing:
+
+diagnose sniffer packet any 'host 198.51.100.50 or host 10.10.10.50 and tcp port 8080' 4 0 a
+
+
+12. Clear FortiGate Sessions
+
+Useful after changing NAT or failover behavior:
+
+diagnose sys session filter clear
+diagnose sys session filter dport 8080
+diagnose sys session clear
+
+
+13. FortiGate Debug Flow
+
+Use this to confirm policy match, DNAT, SNAT, and forwarding path:
+
+diagnose debug reset
+diagnose debug flow filter clear
+diagnose debug flow filter saddr 192.0.2.10
+diagnose debug flow filter daddr 198.51.100.50
+diagnose debug flow filter dport 8080
+diagnose debug flow show function-name enable
+diagnose debug flow trace start 20
+diagnose debug enable
+
+Run curl from client:
+
+curl -m 3 http://198.51.100.50:8080
+
+Stop debug:
+
+diagnose debug disable
+diagnose debug reset
+
+Useful lines to look for:
+- Allowed by policy
+- DNAT 198.51.100.50:8080 -> 10.10.10.50:8080
+- SNAT 192.0.2.10 -> 10.10.10.1
+- send out via vxlan100
+
+
+14. BGP Path Verification on CORE-R1
+
+show ip route 198.51.100.50
+show ip bgp 198.51.100.50
+
+Expected:
+- Before failover, CORE-R1 prefers the Vancouver/FortiGate path.
+- After full external failover, CORE-R1 prefers the Kelowna/FortiGate path.
+
+
+15. Linux Troubleshooting
+
+Check listening ports:
+
+ss -lntp | grep 8080
+
+Test local web server:
+
+curl -m 3 http://127.0.0.1:8080
+curl -m 3 http://10.10.10.50:8080
+
+Capture traffic:
+
+sudo tcpdump -ni ens4 host 10.10.10.50 or port 8080
+
+Flush neighbor/ARP cache:
+
+sudo ip neigh flush dev ens4
+sudo ip neigh flush all
+
+Send gratuitous ARP:
+
+sudo arping -U -I ens4 10.10.10.50 -c 5
+
+
+16. Lessons Learned
+
+- VXLAN provides the stretched Layer 2 domain.
+- VXLAN does not move the service by itself.
+- keepalived controls floating VIP ownership.
+- BGP controls the external traffic path.
+- DNAT maps the public service IP to the internal VIP.
+- SNAT may be required to avoid asymmetric return traffic when the ingress FortiGate is not in the same site as the active VIP owner.
